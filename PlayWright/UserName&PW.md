@@ -51,23 +51,23 @@ D:\PlaywrightTests
 
 首先在 VS Code 终端进入项目目录：
 
-cd D:\PlaywrightTests
+`cd D:\PlaywrightTests`
 
 确认这个目录中存在测试项目的 .csproj 文件，然后执行：
 
-dotnet user-secrets init
+`dotnet user-secrets init`
 
 执行后，.csproj 中会自动增加类似内容：
-
+```
 <PropertyGroup>
   <TargetFramework>net8.0</TargetFramework>
   <UserSecretsId>一串自动生成的唯一标识</UserSecretsId>
 </PropertyGroup>
-
+```
 例如：
-
+```
 <UserSecretsId>36e87eb4-c1df-498d-bceb-7e74fa5a1721</UserSecretsId>
-
+```
 这个 ID 不是密码，可以提交到 Git。
 
 
@@ -76,34 +76,34 @@ dotnet user-secrets init
 三、安装配置读取组件
 
 在测试项目目录执行：
-
+```
 dotnet add package Microsoft.Extensions.Configuration.UserSecrets
-
+```
 然后恢复依赖：
-
+```
 dotnet restore
-
+```
 
 ---
 
 四、写入用户名和密码
 
 在终端执行：
-
+```
 dotnet user-secrets set "TestAccount:Username" "你的用户名"
 dotnet user-secrets set "TestAccount:Password" "你的密码"
-
+```
 例如：
-
+```
 dotnet user-secrets set "TestAccount:Username" "student@example.com"
 dotnet user-secrets set "TestAccount:Password" "Abc123456"
-
+```
 这里输入的值不会写进源代码，也不会写进项目目录。
 
 Windows 系统通常会把它们保存在：
-
+```
 %APPDATA%\Microsoft\UserSecrets\<UserSecretsId>\secrets.json
-
+```
 但一般不需要自己打开这个文件。
 
 
@@ -112,28 +112,28 @@ Windows 系统通常会把它们保存在：
 五、检查和管理 User Secrets
 
 查看当前项目保存了哪些配置：
-
+```
 dotnet user-secrets list
-
+```
 输出类似：
-
+```
 TestAccount:Username = student@example.com
 TestAccount:Password = Abc123456
-
+```
 注意：这个命令会显示真实密码，不要在直播、录屏或共享终端时执行。
 
 修改密码：
-
+```
 dotnet user-secrets set "TestAccount:Password" "新的密码"
-
+```
 删除一项：
-
+```
 dotnet user-secrets remove "TestAccount:Password"
-
+```
 清空当前项目的全部机密：
-
+```
 dotnet user-secrets clear
-
+```
 
 ---
 
@@ -149,7 +149,7 @@ dotnet user-secrets clear
 
 
 你需要根据真实网站修改定位器。
-
+```
 using Microsoft.Extensions.Configuration;
 using Microsoft.Playwright;
 using Microsoft.Playwright.Xunit;
@@ -192,7 +192,7 @@ public class LoginTests : PageTest
         ).ToBeVisibleAsync();
     }
 }
-
+```
 这里真正重要的是：
 
 .AddUserSecrets<LoginTests>()
@@ -212,7 +212,7 @@ configuration["TestAccount:Password"]
 如果以后有很多测试类，每个测试类都重复读取配置会很麻烦。可以建立一个专门的配置类。
 
 TestSettings.cs
-
+```
 using Microsoft.Extensions.Configuration;
 
 namespace PlaywrightTests;
@@ -244,7 +244,7 @@ public static class TestSettings
         return value;
     }
 }
-
+```
 注意这里采用的是：
 
 .AddUserSecrets(typeof(TestSettings).Assembly)
@@ -258,7 +258,7 @@ public static class TestSettings
 这样以后放到 CI/CD 环境中运行时，可以用环境变量覆盖 User Secrets，不需要修改测试代码。
 
 LoginTests.cs
-
+```
 using Microsoft.Playwright.Xunit;
 using Xunit;
 
@@ -288,7 +288,7 @@ public class LoginTests : PageTest
         ).ToBeVisibleAsync();
     }
 }
-
+```
 我更推荐这个封装版本，因为以后账号密码的读取方式发生变化，测试代码不需要跟着修改。
 
 
@@ -297,9 +297,9 @@ public class LoginTests : PageTest
 八、为什么不能只读一个 TXT 文件？
 
 下面这种方式技术上当然可以：
-
+```
 string password = File.ReadAllText(@"D:\password.txt");
-
+```
 但它有明显问题：
 
 文件仍然是明文。
