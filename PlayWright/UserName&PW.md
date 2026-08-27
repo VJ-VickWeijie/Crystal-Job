@@ -362,29 +362,26 @@ Azure 正式环境	Azure Key Vault
 3. appsettings.json 适合普通配置，不适合真实账号密码。
 
 
-思考了 11s
+###如果更安全的真实账号密码怎么处理
+###如果
 
 可以，但要先区分两件事：
 
 1. 真实账号密码保存在哪里。
 
-
 2. 两个账号是在同一个业务流程中依次输入，还是需要同时保持两个登录会话。
-
-
 
 一、真实账号密码如何保存
 
 如果是你个人电脑上的真实账号，可以按安全等级选择：
 
-场景	推荐方案
-
-本地学习、专用测试账号	User Secrets
-本地长期运行、重要真实账号	Windows Credential Manager
-GitHub Actions、Azure DevOps	平台自带 Secrets
-公司服务器或生产环境	Azure Key Vault 等密钥服务
-普通 TXT、Excel、appsettings.json	不推荐
-
+| 场景 | 推荐方案 |
+|---|---|
+| 本地学习、专用测试账号 | User Secrets |
+| 本地长期运行、重要真实账号 | Windows Credential Manager |
+| GitHub Actions、Azure DevOps | 平台自带 Secrets |
+| 公司服务器或生产环境 | Azure Key Vault 等密钥服务 |
+| 普通 TXT、Excel、appsettings.json | 不推荐 |
 
 User Secrets 可以保存真实密码，但需要知道它本质上仍是存放在电脑上的明文 JSON，只是位于项目目录之外，不会被 Git 自动提交。
 
@@ -415,17 +412,17 @@ automation_test_01
 可以在 User Secrets 中使用不同的配置层级。
 
 例如账号 A：
-
+```
 dotnet user-secrets set "Accounts:AccountA:Username" "account-a@example.com"
 dotnet user-secrets set "Accounts:AccountA:Password" "AccountA的密码"
-
+```
 账号 B：
-
+```
 dotnet user-secrets set "Accounts:AccountB:Username" "account-b@example.com"
 dotnet user-secrets set "Accounts:AccountB:Password" "AccountB的密码"
-
+```
 最终逻辑结构相当于：
-
+```
 {
   "Accounts": {
     "AccountA": {
@@ -438,13 +435,13 @@ dotnet user-secrets set "Accounts:AccountB:Password" "AccountB的密码"
     }
   }
 }
-
+```
 这个 JSON 只是帮助你理解结构，不要把真实密码手动写入项目的 appsettings.json。
 
 检查配置：
-
+```
 dotnet user-secrets list
-
+```
 
 ---
 
@@ -453,18 +450,18 @@ dotnet user-secrets list
 建议先定义一个账号数据类型。
 
 TestAccount.cs
-
+```
 namespace PlaywrightTests;
 
 public sealed record TestAccount(
     string Username,
     string Password
 );
-
+```
 然后统一读取。
 
 TestSettings.cs
-
+```
 using Microsoft.Extensions.Configuration;
 
 namespace PlaywrightTests;
@@ -507,19 +504,19 @@ public static class TestSettings
         return value;
     }
 }
-
+```
 以后读取账号时：
-
+```
 TestAccount accountA = TestSettings.AccountA;
 TestAccount accountB = TestSettings.AccountB;
-
+```
 
 ---
 
 四、情况一：同一个流程连续输入两套账号密码
 
 假设某个业务页面确实有两组凭证输入框，可以直接依次填写。
-
+```
 using Microsoft.Playwright.Xunit;
 using Xunit;
 
@@ -553,7 +550,7 @@ public class CredentialInputTests : PageTest
         ).ClickAsync();
     }
 }
-
+```
 这是最简单的情况，因为两个账号只是在同一个页面填写。
 
 
@@ -562,7 +559,7 @@ public class CredentialInputTests : PageTest
 五、情况二：先用账号 A 登录，再退出并使用账号 B
 
 如果需要顺序验证两个账号，可以把登录和退出封装成方法。
-
+```
 using Microsoft.Playwright;
 using Microsoft.Playwright.Xunit;
 using Xunit;
@@ -617,7 +614,7 @@ public class MultipleAccountTests : PageTest
         await page.WaitForURLAsync("**/login");
     }
 }
-
+```
 这种方式依赖网站的退出功能正常清除 Cookie 和登录状态。
 
 
@@ -660,7 +657,7 @@ Session Storage 相互隔离。
 
 
 完整示例：
-
+```
 using Microsoft.Playwright;
 using Microsoft.Playwright.Xunit;
 using Xunit;
@@ -729,7 +726,7 @@ public class ApprovalWorkflowTests : PageTest
         await page.WaitForURLAsync("**/home");
     }
 }
-
+```
 Playwright 官方推荐每个测试使用隔离的浏览器上下文，多个上下文也适合模拟不同用户。Playwright BrowserContext 文档
 
 我的建议
