@@ -362,4 +362,395 @@ Azure 正式环境	Azure Key Vault
 3. appsettings.json 适合普通配置，不适合真实账号密码。
 
 
+思考了 11s
+
+可以，但要先区分两件事：
+
+1. 真实账号密码保存在哪里。
+
+
+2. 两个账号是在同一个业务流程中依次输入，还是需要同时保持两个登录会话。
+
+
+
+一、真实账号密码如何保存
+
+如果是你个人电脑上的真实账号，可以按安全等级选择：
+
+场景	推荐方案
+
+本地学习、专用测试账号	User Secrets
+本地长期运行、重要真实账号	Windows Credential Manager
+GitHub Actions、Azure DevOps	平台自带 Secrets
+公司服务器或生产环境	Azure Key Vault 等密钥服务
+普通 TXT、Excel、appsettings.json	不推荐
+
+
+User Secrets 可以保存真实密码，但需要知道它本质上仍是存放在电脑上的明文 JSON，只是位于项目目录之外，不会被 Git 自动提交。
+
+因此我建议：
+
+普通测试账号：User Secrets 足够。
+
+公司真实业务账号：优先使用专门的自动化测试账号。
+
+个人重要账号：不要轻易交给自动化脚本。
+
+生产账号：使用企业密钥系统，并限制账号权限。
+
+开启 MFA 的账号：不要尝试把验证码种子等高敏感信息直接写入代码。
+
+
+最理想的是让系统提供一个权限受限的自动化账号，例如：
+
+automation_test_01
+
+它只能处理自动化需要的功能，不能访问无关数据，也不能进行高风险操作。
+
+
+---
+
+二、保存两个不同账号
+
+可以在 User Secrets 中使用不同的配置层级。
+
+例如账号 A：
+
+dotnet user-secrets set "Accounts:AccountA:Username" "account-a@example.com"
+dotnet user-secrets set "Accounts:AccountA:Password" "AccountA的密码"
+
+账号 B：
+
+dotnet user-secrets set "Accounts:AccountB:Username" "account-b@example.com"
+dotnet user-secrets set "Accounts:AccountB:Password" "AccountB的密码"
+
+最终逻辑结构相当于：
+
+{
+  "Accounts": {
+    "AccountA": {
+      "Username": "account-a@example.com",
+      "Password": "密码A"
+    },
+    "AccountB": {
+      "Username": "account-b@example.com",
+      "Password": "密码B"
+    }
+  }
+}
+
+这个 JSON 只是帮助你理解结构，不要把真实密码手动写入项目的 appsettings.json。
+
+检查配置：
+
+dotnet user-secrets list
+
+
+---
+
+三、封装多个账号
+
+建议先定义一个账号数据类型。
+
+TestAccount.cs
+
+namespace PlaywrightTests;
+
+public sealed record TestAccount(
+    string Username,
+    string Password
+);
+
+然后统一读取。
+
+TestSettings.cs
+
+using Microsoft.Extensions.Configuration;
+
+namespace PlaywrightTests;
+
+public static class TestSettings
+{
+    private static readonly IConfiguration Configuration =
+        new ConfigurationBuilder()
+            .AddUserSecrets(typeof(TestSettings).Assembly)
+            .AddEnvironmentVariables()
+            .Build();
+
+    public static TestAccount AccountA =>
+        GetAccount("AccountA");
+
+    public static TestAccount AccountB =>
+        GetAccount("AccountB");
+
+    private static TestAccount GetAccount(string accountName)
+    {
+        string username = GetRequiredValue(
+            $"Accounts:{accountName}:Username");
+
+        string password = GetRequiredValue(
+            $"Accounts:{accountName}:Password");
+
+        return new TestAccount(username, password);
+    }
+
+    private static string GetRequiredValue(string key)
+    {
+        string? value = Configuration[key];
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new InvalidOperationException(
+                $"缺少配置项：{key}");
+        }
+
+        return value;
+    }
+}
+
+以后读取账号时：
+
+TestAccount accountA = TestSettings.AccountA;
+TestAccount accountB = TestSettings.AccountB;
+
+
+---
+
+四、情况一：同一个流程连续输入两套账号密码
+
+假设某个业务页面确实有两组凭证输入框，可以直接依次填写。
+
+using Microsoft.Playwright.Xunit;
+using Xunit;
+
+namespace PlaywrightTests;
+
+public class CredentialInputTests : PageTest
+{
+    [Fact]
+    public async Task ShouldFillTwoAccounts()
+    {
+        TestAccount accountA = TestSettings.AccountA;
+        TestAccount accountB = TestSettings.AccountB;
+
+        await Page.GotoAsync("https://example.com/form");
+
+        await Page.Locator("#first-username")
+            .FillAsync(accountA.Username);
+
+        await Page.Locator("#first-password")
+            .FillAsync(accountA.Password);
+
+        await Page.Locator("#second-username")
+            .FillAsync(accountB.Username);
+
+        await Page.Locator("#second-password")
+            .FillAsync(accountB.Password);
+
+        await Page.GetByRole(
+            Microsoft.Playwright.AriaRole.Button,
+            new() { Name = "提交" }
+        ).ClickAsync();
+    }
+}
+
+这是最简单的情况，因为两个账号只是在同一个页面填写。
+
+
+---
+
+五、情况二：先用账号 A 登录，再退出并使用账号 B
+
+如果需要顺序验证两个账号，可以把登录和退出封装成方法。
+
+using Microsoft.Playwright;
+using Microsoft.Playwright.Xunit;
+using Xunit;
+
+namespace PlaywrightTests;
+
+public class MultipleAccountTests : PageTest
+{
+    [Fact]
+    public async Task TwoAccounts_ShouldLoginSequentially()
+    {
+        await LoginAsync(Page, TestSettings.AccountA);
+
+        await Expect(
+            Page.GetByText("欢迎登录")
+        ).ToBeVisibleAsync();
+
+        await LogoutAsync(Page);
+
+        await LoginAsync(Page, TestSettings.AccountB);
+
+        await Expect(
+            Page.GetByText("欢迎登录")
+        ).ToBeVisibleAsync();
+    }
+
+    private static async Task LoginAsync(
+        IPage page,
+        TestAccount account)
+    {
+        await page.GotoAsync("https://example.com/login");
+
+        await page.Locator("#username")
+            .FillAsync(account.Username);
+
+        await page.Locator("#password")
+            .FillAsync(account.Password);
+
+        await page.GetByRole(
+            AriaRole.Button,
+            new() { Name = "登录" }
+        ).ClickAsync();
+    }
+
+    private static async Task LogoutAsync(IPage page)
+    {
+        await page.GetByRole(
+            AriaRole.Button,
+            new() { Name = "退出登录" }
+        ).ClickAsync();
+
+        await page.WaitForURLAsync("**/login");
+    }
+}
+
+这种方式依赖网站的退出功能正常清除 Cookie 和登录状态。
+
+
+---
+
+六、情况三：两个账号同时保持登录
+
+这是实际测试中更常见、也更值得掌握的情况。
+
+例如：
+
+账号 A 是申请人。
+
+账号 B 是审批人。
+
+A 提交单据。
+
+B 登录后审批单据。
+
+A 再查看审批结果。
+
+
+此时不应该在同一个页面里反复退出登录，而应该给每个账号创建独立的 BrowserContext。
+
+同一个 Chromium 浏览器
+├── Context A
+│   └── Page A：账号 A 登录
+└── Context B
+    └── Page B：账号 B 登录
+
+BrowserContext 类似两个相互隔离的浏览器隐私窗口：
+
+Cookie 相互隔离。
+
+Local Storage 相互隔离。
+
+Session Storage 相互隔离。
+
+两个账号不会互相顶掉登录状态。
+
+
+完整示例：
+
+using Microsoft.Playwright;
+using Microsoft.Playwright.Xunit;
+using Xunit;
+
+namespace PlaywrightTests;
+
+public class ApprovalWorkflowTests : PageTest
+{
+    [Fact]
+    public async Task AccountA_Submits_And_AccountB_Approves()
+    {
+        await using IBrowserContext contextA =
+            await Browser.NewContextAsync();
+
+        await using IBrowserContext contextB =
+            await Browser.NewContextAsync();
+
+        IPage pageA = await contextA.NewPageAsync();
+        IPage pageB = await contextB.NewPageAsync();
+
+        await LoginAsync(pageA, TestSettings.AccountA);
+        await LoginAsync(pageB, TestSettings.AccountB);
+
+        // 账号 A 提交申请
+        await pageA.GotoAsync("https://example.com/application");
+
+        await pageA.GetByRole(
+            AriaRole.Button,
+            new() { Name = "提交申请" }
+        ).ClickAsync();
+
+        await Expect(
+            pageA.GetByText("提交成功")
+        ).ToBeVisibleAsync();
+
+        // 账号 B 审批申请
+        await pageB.GotoAsync("https://example.com/approval");
+
+        await pageB.GetByRole(
+            AriaRole.Button,
+            new() { Name = "批准" }
+        ).ClickAsync();
+
+        await Expect(
+            pageB.GetByText("审批成功")
+        ).ToBeVisibleAsync();
+    }
+
+    private static async Task LoginAsync(
+        IPage page,
+        TestAccount account)
+    {
+        await page.GotoAsync("https://example.com/login");
+
+        await page.Locator("#username")
+            .FillAsync(account.Username);
+
+        await page.Locator("#password")
+            .FillAsync(account.Password);
+
+        await page.GetByRole(
+            AriaRole.Button,
+            new() { Name = "登录" }
+        ).ClickAsync();
+
+        await page.WaitForURLAsync("**/home");
+    }
+}
+
+Playwright 官方推荐每个测试使用隔离的浏览器上下文，多个上下文也适合模拟不同用户。Playwright BrowserContext 文档
+
+我的建议
+
+如果你的真实需求是“两个账号参与同一项业务”，最佳组合是：
+
+两个账号分别保存在 User Secrets 或更安全的密钥系统中。
+
+用两个 BrowserContext 分别登录。
+
+用 TestAccount 对账号数据进行封装。
+
+不输出密码，不截图密码输入过程。
+
+使用权限受限的专用测试账号。
+
+不要把真实密码放进 TXT、Excel 或 appsettings.json。
+
+
+其中最关键的概念是：
+
+> 两套账号凭证，用不同配置键保存；两个同时存在的登录用户，用不同 BrowserContext 隔离。
+
 
