@@ -1223,3 +1223,589 @@ B → P101 + PB00
 那我会认为已经基本证明：NO_PRICE_FROM_PO 不是主因；主因是 PB00 在该场景没有被自动确定，而你使用的 U 只是更新，不是在强制创建 PB00。
 
 如果你愿意继续沿这个方向查，下一步最有价值的不是再贴 BAPI 调用代码，而是给我一组 “成功产生 P101+PB00 的 PO”和“一笔只有 P101 的 PO” 的以下字段：LIFNR、MATNR、EKORG、WERKS、INFNR（如果有）、采购凭证类型，敏感值可以打码；以及 M/06 中 P101、PB00 的 Access Sequence。我可以继续帮你把“为什么自动定价一会儿有 PB00、一会儿没有”沿 Access Sequence 一层层定位下去。
+
+思考了 2m
+
+继续沿“为什么 Step 51 没有 PB00”这条线查。看完你这段 VOFM 900 后，我认为 900 不是导致 PB00 不生成的第一嫌疑人，而且我们现在得到一个非常重要的新线索：P101 本身就是 SAP 标准用于 Material Valuation Price / Moving Average Price 的 Condition Type。
+
+SAP 官方说明里，P101 的 Condition Category 是 G，系统会把物料的移动平均价/估价值放进去，典型用途就是没有有效采购价格时。而 PB00 是正常的 Gross/Base Purchase Price，通常通过 Access Sequence 找采购价格。
+
+所以你现在这个现象：
+
+P101 有
+PB00 没有
+
+本身就在强烈暗示：
+
+SAP 没有最终认可 PB00 作为采购价格
+        ↓
+P101 估价值仍然存在
+
+而不是：
+
+P101 把 PB00 转换掉了
+
+
+---
+
+先看你这段 VOFM 900 到底干了什么
+
+你的代码核心：
+
+form frm_kondi_wert_900.
+
+  check: ( xkomv-waers = 'EURC' and komk-waerk = 'EUR' )
+      or ( xkomv-waers = 'USDC' and komk-waerk = 'USD' )
+      or ( xkomv-waers = 'HKDC' and komk-waerk = 'HKD' )
+      or ( xkomv-waers = 'CNYC' and komk-waerk = 'CNY' ).
+
+  data: xkbetr like xkomv-kbetr.
+
+  xkbetr = xkomv-kbetr.
+
+  if komp-shkzg ne space.
+    arbfeld = xkbetr * -1.
+    xkbetr = arbfeld.
+  endif.
+
+  if xkomv-kpein ne 0.
+    arbfeld = xkomv-kawrt * xkbetr / xkomv-kpein.
+  else.
+    arbfeld = xkomv-kawrt * xkbetr.
+  endif.
+
+  arbfeld = arbfeld / 100000.
+  xkwert = arbfeld.
+
+  xkomv-kkurs = komp-kursk.
+
+endform.
+
+它干的是：
+
+已有 Condition
+    ↓
+拿 KBETR
+    ↓
+拿 KAWRT
+    ↓
+考虑 SHKZG 正负号
+    ↓
+考虑 KPEIN Price Unit
+    ↓
+/100000
+    ↓
+重新计算 KWERT
+
+也就是说它属于：
+
+> Alternative Condition Value Formula
+
+
+
+不是：
+
+> Requirement Formula
+
+
+
+这一点非常重要。
+
+SAP 的 Pricing Engine 通常是在 Condition 已经被确定后才执行 Condition Value Formula；官方/标准定价流程也是先 Requirement、Access Sequence、Condition Record Search，然后进入 valuation/calculation。
+
+所以流程实际上是：
+
+PB00 是否允许进入 Pricing
+        ↓
+Access Sequence
+        ↓
+找到 Condition Record？
+        ↓
+创建 XKOMV-PB00
+        ↓
+计算 KBETR / KAWRT
+        ↓
+调用 KOFRM 900
+        ↓
+计算 KWERT
+
+因此：
+
+如果 VOFM 900 被调用时 XKOMV-KSCHL = 'PB00'，PB00 已经生成了。
+
+这句话很关键。
+
+
+---
+
+所以我们现在可以用一个 Debug 一刀切
+
+在：
+
+FORM FRM_KONDI_WERT_900.
+
+第一行打断点。
+
+然后用一笔：
+
+> 最终只有 P101，没有 PB00
+
+
+
+的失败数据跑 BAPI_PO_CREATE1。
+
+进入 900 后立即看：
+
+XKOMV-KSCHL
+
+情况 A：从头到尾从来没有：
+
+XKOMV-KSCHL = PB00
+
+那么：
+
+VOFM 900 可以直接排除。
+
+因为连 PB00 都没创建，当然还轮不到它执行 PB00 的 Value Formula。
+
+这时候调查方向直接转向：
+
+Access Sequence
+Condition Record
+BAPI POCOND 导入
+Condition Type 控制
+
+情况 B：900 真的进入了：
+
+XKOMV-KSCHL = PB00
+
+那么事情完全变了。
+
+说明：
+
+PB00 曾经存在
+    ↓
+VOFM 900 被执行
+    ↓
+之后某个阶段 PB00 才消失
+
+那我们再往后追：
+
+KINAK
+KHERK
+KMANU
+KBETR
+KWERT
+WAERS
+KPEIN
+KMEIN
+KAWRT
+
+这一步可以非常快地把问题砍成两半。
+
+
+---
+
+再看这个 CHECK
+
+这个：
+
+check: ( xkomv-waers = 'EURC' and komk-waerk = 'EUR' )
+    or ( xkomv-waers = 'USDC' and komk-waerk = 'USD' )
+    or ( xkomv-waers = 'HKDC' and komk-waerk = 'HKD' )
+    or ( xkomv-waers = 'CNYC' and komk-waerk = 'CNY' ).
+
+实际上意思是：
+
+> 只有 Condition Currency 和 Document Currency 是这四种特殊组合的时候，我才做这套特殊计算。
+
+
+
+例如：
+
+Condition currency = CNYC
+PO currency        = CNY
+
+才继续。
+
+如果：
+
+Condition currency = CNY
+PO currency        = CNY
+
+那么：
+
+CHECK ...
+
+失败，直接退出 FORM。
+
+但这一般不会删除 PB00。
+
+因为 Condition Value Formula 调用之前，Pricing Engine 通常已经：
+
+xkwert = xkomv-kwert.
+
+PERFORM frm_kondi_wert_900.
+
+xkomv-kwert = xkwert.
+
+也就是说，如果 CHECK 提前退出，XKWERT 通常保持调用前的 Condition Value。SAP Pricing 相关调用代码也是这个传递方式。
+
+所以：
+
+CHECK failed
+
+更接近：
+
+> 不执行特殊的 Currency Calculation。
+
+
+
+而不是：
+
+> PB00 不允许存在。
+
+
+
+而且你的 900 完全没有：
+
+xkomv-kinak = ...
+CLEAR xkomv.
+DELETE ...
+xkomv-kschl = ...
+
+这种会明确影响 Condition 是否有效/存在的代码。
+
+所以目前我会把 VOFM 900 导致 PB00 整行消失的概率放得比较低。
+
+
+---
+
+现在真正值得盯的是 P101
+
+这个发现很重要。
+
+SAP 标准：
+
+P101
+Condition Category = G
+
+含义：
+
+> Moving Average Price / Valuation Price
+
+
+
+SAP 官方甚至明确说，这个 Condition Type 用来把 Material Valuation Price 放进 Pricing，例如没有采购价格的时候。
+
+而：
+
+PB00
+Condition Category = H
+
+是：
+
+> Base Price
+
+
+
+SAP 官方说明 PB00 一般通过 Access Sequence 来查找有效采购价格，例如：
+
+Plant-specific agreement
+Contract
+Purchasing Info Record
+
+标准 PB00 Access Sequence 0002 的示例访问就包括这些来源。
+
+所以你的场景现在可以画得更准确：
+
+ZRM201
+                │
+         ┌──────┴───────┐
+         │              │
+      Step 50         Step 51
+       P101            PB00
+         │              │
+ Material valuation    Purchase Price
+     price              │
+         │              ▼
+         │       Access Sequence /
+         │       POCOND
+         │              │
+         │          有没有有效价格
+         │              │
+         │       ┌──────┴──────┐
+         │       │             │
+         │      YES            NO
+         │       │             │
+         ▼       ▼             ▼
+       P101    PB00        PB00 不成立
+         │       │             │
+         └───┬───┘             ▼
+             │               P101
+             ▼
+        P101 + PB00
+
+所以你说：
+
+> 有时候是 P101 + PB00
+
+
+
+完全合理。
+
+说明 P101 本来就可以存在，而 PB00 又成功确定。
+
+而：
+
+> 有时候只有 P101
+
+
+
+说明真正变化的是：
+
+PB00 这一支。
+
+
+---
+
+这时我反而发现你前面给我的 BAPI 字段里有一个很值得查的东西
+
+你之前告诉我：
+
+lt_condx-change_id    = 'X'
+lt_condx-cond_type    = 'X'
+lt_condx-cond_value   = 'X'
+lt_condx-itm_numberx  = 'X'
+
+但你没有提到：
+
+lt_condx-currency = 'X'
+
+这个现在我认为非常值得确认。
+
+SAP Note 580225 给 PB00 + CHANGE_ID='U' 的标准例子明确包含：
+
+POCOND-CURRENCY
+POCONDX-CURRENCY = X
+
+而且 Note 也明确说明：CHANGE_ID = U 如果目标 Condition 尚不存在，可以新增，并不是只能 Update 已有条件。
+
+所以我现在建议你的 PB00 至少保证：
+
+ls_cond-itm_number = '00010'.
+ls_cond-cond_type  = 'PB00'.
+ls_cond-cond_value = lv_price.
+ls_cond-currency   = ls_poheader-currency.
+ls_cond-change_id  = 'U'.
+
+ls_condx-itm_number  = '00010'.
+ls_condx-itm_numberx = 'X'.
+ls_condx-cond_type   = 'X'.
+ls_condx-cond_value  = 'X'.
+ls_condx-currency    = 'X'.
+ls_condx-change_id   = 'X'.
+
+如果有 Price Unit：
+
+ls_cond-cond_p_unt = lv_peinh.
+ls_cond-cond_unit  = lv_meins.
+
+ls_condx-cond_p_unt = 'X'.
+ls_condx-cond_unit  = 'X'.
+
+我也建议一起传。
+
+特别是你这个 Formula 900 明确读取：
+
+xkomv-waers
+xkomv-kpein
+
+所以：
+
+Currency
+Price Unit
+
+绝对不是无关字段。
+
+
+---
+
+COND_ST_NO = 51 / COND_COUNT = 1 我现在反而不建议过分依赖
+
+Note 580225 的 PB00 Update 示例其实根本不要求你传：
+
+Step
+Counter
+
+而是：
+
+Item
+PB00
+Value
+Currency
+U
+
+就够了。
+
+所以你现在：
+
+COND_ST_NO = 51
+COND_COUNT = 1
+
+理论上没有问题，但既然你传了，我建议 X 表也对应完整：
+
+ls_condx-cond_st_no  = '051'.
+ls_condx-cond_st_nox = 'X'.
+ls_condx-cond_count  = 'X'.
+
+否则我会倾向两个方案之一：
+
+要么完整传：
+
+051 / 01
++
+对应 X
+
+要么测试时干脆完全不要传：
+
+COND_ST_NO
+COND_COUNT
+
+只让：
+
+COND_TYPE = PB00
+
+去定位。
+
+这样能排除 BAPI Condition Matching 的干扰。
+
+
+---
+
+下一步我建议你只做两个 Debug，不要再改一堆配置
+
+第一个最重要：
+
+BREAK-POINT 在 FRM_KONDI_WERT_900.
+
+拿“失败案例”。
+
+观察有没有：
+
+XKOMV-KSCHL = 'PB00'.
+
+如果从来没有：
+
+> VOFM 900 直接排除。
+
+
+
+然后第二个 Debug：
+
+进入 PB00 自动 Condition Determination 的时候，看 PB00 的 Access Sequence。
+
+SAP Pricing 大致顺序是：
+
+读取 ZRM201
+   ↓
+PB00
+   ↓
+Requirement
+   ↓
+Access Sequence
+   ↓
+逐个 Condition Table
+   ↓
+KONDITIONEN_LESEN
+   ↓
+找到记录
+   ↓
+XKOMV PB00
+
+SAP 对 Pricing Requirement 的技术处理也说明，只有 Requirement/Access Requirement 满足后系统才会搜索 Condition Records，搜索结束之后才进入 valuation。
+
+也就是说：
+
+Access Sequence
+
+是在：
+
+VOFM 900
+
+之前的。
+
+
+---
+
+成功案例和失败案例真正应该比较什么
+
+这次不要比较很多无关字段。
+
+只比较 PB00 Access Sequence 所需要的 key：
+
+Vendor
+Material
+Purchasing Organization
+Plant
+Info Record
+Contract / Agreement
+Pricing Date
+Validity
+Currency
+Order Unit
+Price Unit
+
+SAP 官方标准 PB00 示例会依次寻找例如 Plant-specific agreement、Contract、Purchasing Info Record；如果找到有效记录，就把 PB00 带入。
+
+所以很可能：
+
+成功案例
+Vendor + Material + EKORG + Plant
+               ↓
+          找到 PB00
+               ↓
+          P101 + PB00
+
+而：
+
+失败案例
+Vendor + Material + EKORG + Plant
+               ↓
+PB00 Access Sequence 全部 miss
+               ↓
+     BAPI PB00 又没有成功建立
+               ↓
+            P101
+
+
+---
+
+我现在会给嫌疑点重新排序
+
+优先级	嫌疑点	当前判断
+
+1	PB00 Access Sequence / Condition Record	★★★★★
+2	POCOND 的 Currency / Unit / X 字段不完整	★★★★★
+3	POCOND Step/Counter 与 X 结构不一致	★★★
+4	PB00 M/06 的 Manual Entries / Condition Category / Access Sequence	★★★
+5	Condition Exclusion	★★★
+6	VOFM 900	★★
+7	NO_PRICE_FROM_PO	★
+
+
+尤其是：
+
+P101 = Valuation Price
+
+这个发现让我现在非常倾向于：
+
+> 失败案例里，SAP 没有拿到一个最终有效的 PB00 Base Purchase Price。
+
+
+
+P101 只是这个状态的表现。
+
+而你这段 VOFM 900，从代码本身来看，没有“不要 PB00”的逻辑。
+
+最有效的一刀就是：下一次失败案例，在 FRM_KONDI_WERT_900 上打断点。如果 PB00 根本进不到 900，我们下一步就完全不用再研究 Formula 900，而是直接沿 PB00 → M/06 Access Sequence → T682I → Condition Table → Condition Record 往下追。
