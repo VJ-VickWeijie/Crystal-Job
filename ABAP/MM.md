@@ -44,3 +44,25 @@ CALL FUNCTION 'BAPI_PO_CREATE1'
 | M |	ZRM201 | 500 |    | GRWR | 400 |    |   | 	 | C | 	 | 900 | 
 
 
+``` abap
+form frm_kondi_wert_900.                                         1
+  check: ( xkomv-waers = 'EURC' and komk-waerk = 'EUR' )
+      or ( xkomv-waers = 'USDC' and komk-waerk = 'USD' )
+      or ( xkomv-waers = 'HKDC' and komk-waerk = 'HKD' )
+      or ( xkomv-waers = 'CNYC' and komk-waerk = 'CNY' ).
+  data: xkbetr like xkomv-kbetr.
+  xkbetr = xkomv-kbetr.
+  if komp-shkzg ne space.
+    arbfeld = xkbetr * -1.
+    xkbetr = arbfeld.
+  endif.
+  if xkomv-kpein ne 0.
+    arbfeld = xkomv-kawrt * xkbetr / xkomv-kpein.
+  else.
+    arbfeld = xkomv-kawrt * xkbetr.
+  endif.
+  arbfeld = arbfeld / 100000.
+  xkwert = arbfeld.
+  xkomv-kkurs = komp-kursk.
+endform.
+```
