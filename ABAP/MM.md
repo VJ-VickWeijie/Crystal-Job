@@ -1,7 +1,9 @@
 你是资深的SAP HANA 开发人员，
 以下是代码片段，我调用了BAPI_PO_CREATE1，在lt_cond和lt_condx里面只传入了一个PB00的Condition。但是执行完之后只会出现一个P101的Condition TYpe，没有PB00的Conditon Type。
-1、是不是Exporting里面的no_price_from_po 影响到了？如果是，具体是怎么影响的，原理是什么？
-2、这个情况不是必然发生的，因为有些时候，会出现P101 和 PB00两个内容。
+
+- 是不是Exporting里面的no_price_from_po 影响到了？如果是，具体是怎么影响的，原理是什么？
+- 这个情况不是必然发生的，因为有些时候，会出现P101 和 PB00两个内容。
+
 ``` ABAP
 CALL FUNCTION 'BAPI_PO_CREATE1'
     EXPORTING
