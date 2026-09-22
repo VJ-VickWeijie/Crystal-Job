@@ -670,3 +670,556 @@ Condition Exclusion
 其中你这个案例里，KOFRM = 900 是我特别想追下去的线索。
 
 如果你下一条把 lt_poitem / lt_poitemx / lt_cond / lt_condx 实际 append 的那段代码贴出来，尤其是 PO_PRICE、CALCTYPE、CHANGE_ID、COND_ST_NO、COND_COUNT，我可以直接按照 BAPI 的实际 Pricing 流程帮你逐字段判断，基本可以把问题缩小到具体哪一个字段或 Formula 900。
+
+
+
+思考了 52s
+
+你这组字段一出来，我会把排查优先级明显调整。
+
+现在最可疑的不是 NO_PRICE_FROM_PO，也不是 PO_PRICE/CALCTYPE，而是 CHANGE_ID = 'U' + POCONDX 对 Step/Counter 的标识。
+
+SAP 对 BAPI_PO_CREATE1 的定价说明中，U 的标准场景是：系统先自动确定出某个条件，例如 PB00=90，然后你通过 POCOND-CHANGE_ID = 'U' 把它改成 100。相反，I 的标准语义是额外插入一个条件。
+
+所以你的情况非常可能是下面这个流程：
+
+BAPI 开始创建 PO
+        │
+        ▼
+执行 ZRM201 自动定价
+        │
+        ├── P101 自动确定成功
+        │
+        └── PB00？
+              │
+        ┌─────┴─────┐
+        │           │
+      找到了       没找到
+        │           │
+        ▼           ▼
+ POCOND U       POCOND U
+ 找到 PB00      没有 PB00 可更新
+        │           │
+        ▼           ▼
+ 修改 PB00       什么也没插进去
+        │           │
+        ▼           ▼
+ P101 + PB00       P101
+
+这与你描述的“不是每次都发生，有时候 P101+PB00，有时候只有 P101”高度吻合。
+
+
+---
+
+还有一个我现在很关注的问题：你的 POCONDX 看起来可能没填完整
+
+你告诉我的：
+
+lt_cond-cond_st_no = 51.
+lt_cond-cond_count = 1.
+lt_cond-cond_type   = 'PB00'.
+lt_cond-change_id   = 'U'.
+
+但是你列出的 lt_condx 只有：
+
+lt_condx-change_id   = 'X'.
+lt_condx-cond_type   = 'X'.
+lt_condx-cond_value  = 'X'.
+lt_condx-itm_numberx = 'X'.
+
+如果你实际代码里确实没有下面这些：
+
+lt_condx-cond_st_no  = '051'.
+lt_condx-cond_st_nox = 'X'.
+lt_condx-cond_count  = 'X'.
+
+那我建议你首先补上。
+
+BAPIMEPOCONDX 里确实存在 COND_ST_NO、COND_ST_NOX，而 COND_COUNT 在 X 结构里本身就是 update indicator。
+
+你的 ZRM201：
+
+Step  Counter Condition
+50            P101
+51    1       PB00
+51    2       PBXX
+
+所以你实际上是在告诉 BAPI：
+
+我要操作：
+Item xxxx
+Step 51
+Counter 1
+PB00
+
+这个信息最好完整地给进去。
+
+我建议你的结构至少长这样：
+
+CLEAR: ls_cond, ls_condx.
+
+ls_cond-itm_number = '000010'.
+ls_cond-cond_st_no = '051'.
+ls_cond-cond_count = '01'.
+ls_cond-cond_type  = 'PB00'.
+ls_cond-cond_value = lv_price.
+ls_cond-currency   = lv_waers.
+ls_cond-change_id  = 'U'.
+
+APPEND ls_cond TO lt_cond.
+
+
+ls_condx-itm_number  = '000010'.
+ls_condx-cond_st_no  = '051'.
+
+ls_condx-itm_numberx = 'X'.
+ls_condx-cond_st_nox = 'X'.
+ls_condx-cond_count  = 'X'.
+ls_condx-cond_type   = 'X'.
+ls_condx-cond_value  = 'X'.
+ls_condx-currency    = 'X'.
+ls_condx-change_id   = 'X'.
+
+APPEND ls_condx TO lt_condx.
+
+尤其注意这里：
+
+ls_condx-cond_st_no  = '051'.
+ls_condx-cond_st_nox = 'X'.
+ls_condx-cond_count  = 'X'.
+
+这里 COND_COUNT 在 X 结构里不是填 01，而是：
+
+COND_COUNT = 'X'
+
+因为它表示对应字段有效。BAPIMEPOCOND 中真正的 Condition Counter 才是 NUMC 类型的 01。
+
+
+---
+
+但是，即使把 X 表补完整，U 仍然有一个根本问题
+
+这是我认为你现在这个问题里最重要的一点。
+
+你设置：
+
+CHANGE_ID = 'U'.
+
+本质上是在说：
+
+> SAP，你自动定价出来以后，找到这个 PB00，然后帮我修改它。
+
+
+
+并不是：
+
+> SAP，无论如何都给我创建一个 PB00。
+
+
+
+SAP Note 580225 给的 U 示例本身就是这个逻辑：
+
+系统自动确定 PB00 = 90
+        ↓
+POCOND:
+PB00 = 100
+CHANGE_ID = U
+        ↓
+把已有 PB00 改成 100
+
+
+
+所以现在要问的关键问题其实变成：
+
+> 在出问题的 PO 中，BAPI 自动 Pricing 阶段到底有没有产生 PB00？
+
+
+
+这比研究 NO_PRICE_FROM_PO 更重要。
+
+
+---
+
+我建议你马上做一个非常有效的测试
+
+拿一笔“最后只有 P101”的数据。
+
+Test 1：完全不传 POCOND/POCONDX
+
+也就是暂时：
+
+* pocond  = lt_cond
+* pocondx = lt_condx
+
+让 BAPI 完全自动定价。
+
+看看创建出来到底是什么。
+
+如果结果还是：
+
+P101
+
+没有：
+
+PB00
+
+那基本已经破案了。
+
+说明：
+
+系统自动定价
+↓
+只产生 P101
+↓
+没有产生 PB00
+↓
+你的 CHANGE_ID='U'
+↓
+找不到 PB00 可以 Update
+↓
+最终仍然只有 P101
+
+此时 POCOND 根本没有“创建 PB00”。
+
+
+---
+
+Test 2：把 U 临时改成 I
+
+同一笔测试数据：
+
+ls_cond-change_id = 'I'.
+
+其他保持：
+
+COND_ST_NO = '051'
+COND_COUNT = '01'
+COND_TYPE  = 'PB00'
+
+如果最后变成：
+
+P101
+PB00
+
+那么问题基本可以确定：
+
+不是 NO_PRICE_FROM_PO。
+
+而是：
+
+> 这笔 PO 的自动 Pricing 没产生 PB00，而你的 U 只能修改已有的 PB00；改成 I 以后 PB00 才真正被插入。
+
+
+
+CHANGE_ID='I' 正是 SAP 给出的“额外插入条件”的标准用法。
+
+
+---
+
+但是生产代码不要直接无脑把 U 改成 I
+
+因为另一种情况已经存在：
+
+自动 Pricing 已经找到了 PB00
++
+你又 CHANGE_ID = I
+
+那么存在产生：
+
+PB00 自动
+PB00 手工
+
+甚至重复 Condition 的风险。
+
+SAP 目前的 KBA 也明确把 BAPI PO 的“Unexpected condition / Expected condition not added / Duplicate condition”等归类为 Purchasing BAPI Pricing 常见问题。
+
+所以：
+
+U
+
+适用于：
+
+自动已经存在 PB00
+→ 修改 PB00
+
+而：
+
+I
+
+适用于：
+
+本来不存在 PB00
+→ 新增 PB00
+
+这是两种不同语义。
+
+
+---
+
+现在 P101 的身份也越来越清楚了
+
+你的定价过程：
+
+ZRM201
+
+050       P101
+051 / 01  PB00
+051 / 02  PBXX
+
+因此我现在不会认为：
+
+PB00 → P101
+
+发生了“转换”。
+
+更准确的是：
+
+Pricing Engine
+│
+├── Step 50
+│     └── 得到了 P101
+│
+└── Step 51
+      ├── PB00
+      └── PBXX
+
+P101 和 PB00 是两条独立 Condition。
+
+所以最后只有：
+
+P101
+
+真正应该追的问题是：
+
+> 为什么这一次 Step 51/Counter 1 没有产生 PB00？
+
+
+
+而不是：
+
+> 为什么 PB00 变成了 P101？
+
+
+
+这是两个完全不同的调查方向。
+
+
+---
+
+为什么某些 PO 自动有 PB00，某些没有？
+
+现在应该开始比较“成功 PO”和“失败 PO”的自动定价来源。
+
+尤其比较：
+
+Vendor
+Material
+Purchasing Organization
+Purchasing Group
+Plant
+Company Code
+
+Document Date
+Pricing Date
+
+Info Record
+Contract
+Scheduling Agreement
+Source of Supply
+
+特别是 PIR。
+
+因为即使：
+
+no_price_from_po = 'X'.
+
+SAP 仍然会从 Information Record 获取条件；这个参数主要阻止的是从之前的采购凭证复制价格条件。
+
+所以完全可能出现：
+
+PO A
+
+存在有效 PIR/Condition Record：
+
+自动定价
+↓
+P101
+PB00
+↓
+你的 U 找到 PB00
+↓
+P101 + PB00
+
+PO B
+
+没有有效 PB00 来源：
+
+自动定价
+↓
+P101
+没有 PB00
+↓
+你的 U 找不到 PB00
+↓
+只剩 P101
+
+这就非常符合你现在观察到的现象。
+
+
+---
+
+Formula 900 我现在会降一级优先级
+
+上一轮我比较怀疑：
+
+PB00 → KOFRM 900
+
+现在看到你的 CHANGE_ID='U' 后，我会把优先级调整成：
+
+① CHANGE_ID = U
+② POCONDX Step/Counter 是否完整
+③ 自动 Pricing 为什么有时没有 PB00
+④ P101 从哪里自动确定
+⑤ Formula 900
+
+原因是 Formula 900 属于：
+
+Alternative condition value formula
+
+它主要参与条件值计算。
+
+除非你们 Formula 900 里面写了比较激进的自定义逻辑，否则如果现象是：
+
+> PB00 整行完全不存在
+
+
+
+那么 U 找不到目标，比 Formula 900 更符合现象。
+
+
+---
+
+你现在最好这样 Debug
+
+不用从 BAPI_PO_CREATE1 第一行一路 F5。
+
+先拿：
+
+> 一笔最终只有 P101 的案例。
+
+
+
+然后在 BAPI 内 Pricing 完成以后观察内部 Condition Table。
+
+在 S/4 的采购订单处理过程中可以重点寻找：
+
+TKOMV
+XKOMV
+MMPUR_KOMV
+
+或者使用/观察：
+
+MEPO_DOC_TKOMV_GET
+
+SAP 自己的相关 KBA 也把 MEPO_DOC_TKOMV_GET 列为采购订单定价条件分析相关对象。
+
+你只要找到 POCOND 被应用之前 的那个时间点。
+
+然后搜索：
+
+KSCHL = 'PB00'
+
+如果找不到 PB00
+
+那基本可以确认：
+
+自动 Pricing 没产生 PB00
++
+CHANGE_ID U 没有对象可更新
+
+这就是主因。
+
+如果已经存在 PB00
+
+那么继续单步：
+
+PB00
+↓
+POCOND U
+↓
+后续 Pricing
+↓
+Formula 900
+↓
+最终 PB00 消失
+
+这时我们才去查：
+
+KOFRM 900
+Condition exclusion
+KINAK
+Enhancement / BAdI
+
+
+---
+
+我现在对你的案例判断
+
+基于你目前给出的所有信息，我认为最有可能的流程已经从：
+
+NO_PRICE_FROM_PO
+
+转到了：
+
+ZRM201
+                   │
+          自动 Condition Determination
+                   │
+           ┌───────┴────────┐
+           │                │
+         P101             PB00
+        Step50          Step51/1
+           │                │
+        经常存在        有时存在
+                            │
+                  ┌─────────┴─────────┐
+                  │                   │
+               存在                不存在
+                  │                   │
+                  ▼                   ▼
+            CHANGE_ID U          CHANGE_ID U
+                  │                   │
+           Update PB00          没有对象可 Update
+                  │                   │
+                  ▼                   ▼
+           P101 + PB00             P101
+
+这个模型目前和你描述的现象匹配度非常高。
+
+另外，你的 POCONDX 我建议立即确认这三个：
+
+ls_condx-cond_st_no  = '051'.
+ls_condx-cond_st_nox = 'X'.
+ls_condx-cond_count  = 'X'.
+
+如果目前确实没填，先补上再测。
+
+最后做两个 A/B 测试就很容易把问题钉死：
+
+同一笔“失败数据”
+
+A：不传 POCOND
+→ 看 SAP 自己有没有 PB00
+
+B：PB00 + CHANGE_ID='I'
+→ 看 PB00 是否稳定出现
+
+如果结果分别是：
+
+A → P101
+
+B → P101 + PB00
+
+那我会认为已经基本证明：NO_PRICE_FROM_PO 不是主因；主因是 PB00 在该场景没有被自动确定，而你使用的 U 只是更新，不是在强制创建 PB00。
+
+如果你愿意继续沿这个方向查，下一步最有价值的不是再贴 BAPI 调用代码，而是给我一组 “成功产生 P101+PB00 的 PO”和“一笔只有 P101 的 PO” 的以下字段：LIFNR、MATNR、EKORG、WERKS、INFNR（如果有）、采购凭证类型，敏感值可以打码；以及 M/06 中 P101、PB00 的 Access Sequence。我可以继续帮你把“为什么自动定价一会儿有 PB00、一会儿没有”沿 Access Sequence 一层层定位下去。
